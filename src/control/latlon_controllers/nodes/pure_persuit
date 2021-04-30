@@ -1,0 +1,36 @@
+#!/usr/bin/env python
+
+import rospy
+
+from zzz_common.params import parse_private_args
+from zzz_driver_msgs.msg import RigidBodyStateStamped
+from zzz_planning_msgs.msg import DecisionTrajectory
+from zzz_control_msgs.msg import ControlCommand
+from zzz_control_latlon_controllers import MainController
+
+
+class ControllerNode(object):
+    def __init__(self):
+        params = parse_private_args(
+            control_topic="command",
+            pose_topic="/zzz/navigation/ego_pose",
+            trajectory_topic="/zzz/planning/safeguard_trajectory"
+        )
+
+        self._rate = rospy.Rate(20)
+        self._control_instance = MainController()
+
+        self._pose_subscriber = rospy.Subscriber(params.pose_topic, RigidBodyStateStamped, self.sync_update_pose)
+        self._decision_subscriber = rospy.Subscriber(params.trajectory_topic, DecisionTrajectory, self._control_instance.update_decision)
+        self._command_publisher = rospy.Publisher(params.control_topic, ControlCommand, queue_size=1)
+
+    def sync_update_pose(self, pose):
+        # Low level controller should do control based on pose update
+        self._control_instance.update_pose(pose)        
+        control_msg = self._control_instance.run_step()
+        self._command_publisher.publish(control_msg)
+
+if __name__ == "__main__":
+    rospy.init_node("latlon_controller", log_level=rospy.DEBUG)
+    node = ControllerNode()
+    rospy.spin()

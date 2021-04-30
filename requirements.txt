@@ -1,0 +1,12 @@
+addict
+pathlib
+cython >= 0.29 # This is for pcl-py to be correctly built
+utm
+intervaltree
+plotly
+dash
+filterpy
+pcl-py
+scipy >= 1.2.0
+shapely
+cvxopt
