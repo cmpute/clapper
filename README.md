@@ -1,5 +1,5 @@
 # Clapper - Perception Extension for CLAP framework
-This repo forks base on commit `90f1fd3ac7b35eeea391fa4d2fa8cd11e7e73d18` of original repo.
+This repo forks base on commit [`90f1fd3ac7b35eeea391fa4d2fa8cd11e7e73d18`](https://gitlab.com/umvdl/zzz/zzz/-/tree/90f1fd3ac7b35eeea391fa4d2fa8cd11e7e73d18) of original repo. The codebase should be able to be combined by cherry picking commits of this repo after `afb19bfc43d3a88bd49c3707cc1918f857ef6f2f`.
 
 # Usage
 
