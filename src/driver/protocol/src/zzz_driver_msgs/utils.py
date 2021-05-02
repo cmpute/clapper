@@ -30,16 +30,3 @@ def get_yaw(msg):
         return get_yaw(msg.state)
     else:
         raise ValueError("Incorrect message type for get_yaw")
-
-def convert_odometry_to_state(msg):
-    '''
-    Convert nav_msgs/Odometry to zzz_driver_msgs/RigidBodyStateStamped
-    '''
-
-    new_msg = RigidBodyStateStamped()
-    new_msg.header = msg.header
-    new_msg.state.child_frame_id = msg.child_frame_id
-
-    new_msg.state.pose = msg.pose
-    new_msg.state.twist = msg.twist
-    return new_msg

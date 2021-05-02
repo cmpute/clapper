@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(zzz_perception_detection_lidar_detectors)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 
 find_package(catkin REQUIRED COMPONENTS
   roscpp
@@ -57,3 +57,9 @@ install(TARGETS euclidean_cluster_detector
 
 install(DIRECTORY include/${PROJECT_NAME}/
         DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION})
+
+
+catkin_install_python(PROGRAMS
+  nodes/mmdet3d_detector
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)

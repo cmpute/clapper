@@ -15,8 +15,8 @@ from zzz_driver_actuators_dataspeed_adapter.mkz import \
 from mcity_msg.msg import BSM, BSMVec, Control, VehicleState
 
 control_counter = 0
-MCITY_X0 = 277269.19443569996
-MCITY_Y0 = 4686394.2924168585
+MCITY_X0 = 277269.19443569996 # lat: 42.297953675742356
+MCITY_Y0 = 4686394.2924168585 # lon: -83.7019589083345
 
 def convert_from_VehicleState(msg, pub):
     assert type(msg) == VehicleState

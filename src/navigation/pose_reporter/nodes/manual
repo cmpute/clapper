@@ -9,36 +9,39 @@ import utm # utm is required
 from zzz_common.params import parse_private_args
 from zzz_common.kinematics import get_absolute_state
 from zzz_driver_msgs.msg import RigidBodyStateStamped
-from zzz_driver_msgs.utils import convert_odometry_to_state
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import NavSatFix
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 
 class Node(object):
-    # TODO: add service callback to update map origin, this will update both self._map_origin and self._odom_translation
+    # TODO: add service callback to update map origin or reset odom origin, this will update both self._map_origin and self._odom_translation
     # TODO: we don't have to guess for the origin of the map in Carla, but in a real car we need to get the starting point of a GPS
     def __init__(self):
         params = parse_private_args(
-            odom_input_topic = "/zzz/perception/odometry",
+            odom_input_topic = "/zzz/perception/odometry", # we will make sure odometry starts from origin of "odom" frame
             pose_output_topic = "ego_pose",
             gnss_input_topic = "/zzz/drivers/gnss",
-            map_origin = [0, 0, 0], # [lon, lat, alt]
-            odom_translatin = [0, 0, 0], # [x, y, z] in UTC
+            map_origin = [0, 0, 0], # [lat, lon, alt]
+            odom_translation = [0, 0, 0], # [x, y, z] in UTM
             odom_rotation = [0, 0, 0, 1], # [x, y, z, w]
-            guess_from_start = False # Guess odom to map from the first message
+            guess_from_start = False, # Guess odom to map from the first message
         )
 
-        self._tfbuffer = tf2.Buffer()
         self._tfreporter = tf2.TransformBroadcaster()
+        self._tfreporter_static = tf2.StaticTransformBroadcaster()
         self._tfupdate = False
         self._guess_from_start = params.guess_from_start
 
-        self._map_origin = params.map_origin # GPS location of map origin. Map origin is (0,0,0) in local ENU frame
-        self._odom_translation = params.odom_translatin # translation from map origin to odom start
-        self._odom_rotation = params.odom_rotation # rotation from map axis (ENU) to odom start axis
+        self._map_origin = params.map_origin # GPS location of map origin. Map origin will be (0,0,0) in local ENU frame
+        self._odom_translation = params.odom_translation # initial translation from map origin to odom start
+        self._odom_rotation = params.odom_rotation # initial rotation from map axis (ENU) to odom start axis
+        self._init_position = None
+        self._init_orientation = None
+
         self._odom_subscriber = rospy.Subscriber(params.odom_input_topic, Odometry, self.odom_callback)
         self._pose_publisher = rospy.Publisher(params.pose_output_topic, RigidBodyStateStamped, queue_size=1)
+
         if self._guess_from_start:
             self._gnss_subscriber = [
                 Subscriber(params.gnss_input_topic, NavSatFix),
@@ -46,33 +49,74 @@ class Node(object):
             ]
             self._gnss_synchronizer = ApproximateTimeSynchronizer(
                 self._gnss_subscriber, 5, 0.1)
-            self._gnss_synchronizer.registerCallback(self.gnss_callback)
+            self._gnss_synchronizer.registerCallback(self.guess_start_callback)
 
-    def gnss_callback(self, gnss, odom):
+    def guess_start_callback(self, gnss, odom):
+        if not self._guess_from_start: # Prevent duplicate call
+            return
+
         map_proj = utm.from_latlon(self._map_origin[0], self._map_origin[1])
-        gnss_proj = utm.from_latlon(gnss.longitude, gnss.latitude)
+        rospy.logdebug("Receive GNSS: lon=%f, lat=%f" % (gnss.longitude, gnss.latitude))
+        gnss_proj = utm.from_latlon(gnss.latitude, gnss.longitude)
         # TODO: record covariance
+
         self._odom_translation = [
             gnss_proj[0] - map_proj[0], # East
             gnss_proj[1] - map_proj[1], # North
             gnss.altitude - self._map_origin[2] # Up
         ]
-        self._odom_rotation = [ # Here we assume the orientation of IMU is aligned with world frame
+        self._odom_rotation = np.array([
             odom.pose.pose.orientation.x,
             odom.pose.pose.orientation.y,
             odom.pose.pose.orientation.z,
             odom.pose.pose.orientation.w
-        ]
-        
+        ])
+        self._init_position = np.array([
+            odom.pose.pose.position.x,
+            odom.pose.pose.position.y,
+            odom.pose.pose.position.z
+        ])
+        self._init_orientation = np.array([
+            odom.pose.pose.orientation.x,
+            odom.pose.pose.orientation.y,
+            odom.pose.pose.orientation.z,
+            odom.pose.pose.orientation.w
+        ])
+
+        self._tfreporter_static.sendTransform(self.create_map_odom_transform())
+
         # Unregister subscriber
         for sub in self._gnss_subscriber:
             sub.sub.unregister()
+        self._guess_from_start = False
 
     def odom_callback(self, msg):
-        if self._tfupdate:
-            self._tfreporter.sendTransform(self.create_map_odom_transform())
-            self._tfupdate = False
-        
+        if self._guess_from_start: # don't report if map origin is not initialized
+            return
+
+        # calculate relative odom
+        odom_quat = [msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w]
+        init_iquat = list(self._init_orientation[:3]) + [-self._init_orientation[3]]
+        rel_quat = tft.quaternion_multiply(init_iquat, odom_quat)
+
+        pos = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        diff = np.dot(pos - self._init_position, tft.quaternion_matrix(init_iquat)[:3,:3].T)
+        msg.pose.pose.position.x = diff[0]
+        msg.pose.pose.position.y = diff[1]
+        msg.pose.pose.position.z = diff[2]
+        msg.pose.pose.orientation.x = rel_quat[0]
+        msg.pose.pose.orientation.y = rel_quat[1]
+        msg.pose.pose.orientation.z = rel_quat[2]
+        msg.pose.pose.orientation.w = rel_quat[3]
+
+        self._tfreporter.sendTransform(self.create_odom_base_transform(msg))
+
+        rel_state = RigidBodyStateStamped()
+        rel_state.header = msg.header
+        rel_state.state.child_frame_id = msg.child_frame_id
+        rel_state.state.pose = msg.pose
+        rel_state.state.twist = msg.twist
+
         # Transformation from odom frame to map is static
         odom_state = RigidBodyStateStamped()
         odom_state.header.frame_id = "map"
@@ -86,17 +130,15 @@ class Node(object):
         odom_state.state.pose.pose.orientation.z = self._odom_rotation[2]
         odom_state.state.pose.pose.orientation.w = self._odom_rotation[3]
 
-        rel_state = convert_odometry_to_state(msg)
         state = get_absolute_state(rel_state, odom_state, check_frame=False)
+        self._pose_publisher.publish(state)
 
         rospy.logdebug("Position: %.3f, %.3f", state.state.pose.pose.position.x, state.state.pose.pose.position.y)
-        
-        self._pose_publisher.publish(state)
 
     def create_map_odom_transform(self):
         transform = TransformStamped()
         transform.header.stamp = rospy.Time.now()
-        transform.header.frame_id = "world"
+        transform.header.frame_id = "map"
         transform.child_frame_id = "odom"
         transform.transform.translation.x = self._odom_translation[0]
         transform.transform.translation.y = self._odom_translation[1]
@@ -106,6 +148,16 @@ class Node(object):
         transform.transform.rotation.z = self._odom_rotation[2]
         transform.transform.rotation.w = self._odom_rotation[3]
         return transform
+
+    def create_odom_base_transform(self, odom_msg):
+        transform = TransformStamped()
+        transform.header.stamp = odom_msg.header.stamp
+        transform.header.frame_id = "odom"
+        transform.child_frame_id = odom_msg.child_frame_id
+        transform.transform.translation = odom_msg.pose.pose.position
+        transform.transform.rotation = odom_msg.pose.pose.orientation
+        return transform
+
 
 if __name__ == "__main__":
     rospy.init_node("pose_reporter", log_level=rospy.DEBUG)

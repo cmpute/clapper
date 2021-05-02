@@ -44,8 +44,8 @@ uint32 CYCLIST_TRICYCLE                 = 51    # 0x0033
 
 uint32 ANIMAL                           = 4     # 0x0004
 uint32 ANIMAL_DOGLIKE                   = 20    # 0x0014, includes dog, cat, wolf, etc.
-uint32 ANIMAL_DEERLIKE                  = 36    # 0x0024, includes deer, etc.
-uint32 ANIMAL_COWLIKE                   = 52    # 0x0034, includes cow, horse, pig, etc.
+uint32 ANIMAL_DEERLIKE                  = 36    # 0x0024, includes deer, horse, etc.
+uint32 ANIMAL_COWLIKE                   = 52    # 0x0034, includes cow, pig, etc.
 
 uint32 ROAD_OBJECT                      = 5     # 0x0005, objects in road area
 uint32 ROAD_TRAFFIC_CONE                = 21    # 0x0015, traffic cone

@@ -1,0 +1,131 @@
+#!/usr/bin/env python
+
+# To run with python in anaconda
+# assume anaconda home is $AHOME
+# PYTHONHOME=AHOME PYTHONPATH=$PYTHONPATH:AHOME/lib/python3.8/site-packages:/usr/lib/python3/dist-packages rosrun zzz_perception_detection_lidar_detectors mmdet3d_detector
+
+import time, os
+import numpy as np
+import pcl
+
+import rospy
+from sensor_msgs.msg import PointCloud2
+from zzz_perception_msgs.msg import DetectionBoxArray, DetectionBox
+
+from scipy.spatial.transform import Rotation
+from threading import Thread, Event
+
+from mmdet3d.apis import init_detector, inference_detector_online
+from copy import deepcopy
+import torch
+
+class MMDetector:
+    def __init__(self,
+                 config_file,
+                 checkpoint_file,
+                 input_topic="/velodyne_points",
+                 objects_output_topic="/objects_detected",
+                 semantics_output_topic="", # Empty means don't use semantics
+                 scale_intensity=False, # True: intensity=[0-1]
+                 score_thres=0.4,
+                 time_buffer=-1, # TODO: implement this, >=0 means using timestamp in point cloud input (as in Nuscenes)
+                 remove_close=1): # remove points close to origin, value is the threshold
+        self._score_thres = score_thres
+        self._model = init_detector(config_file, checkpoint_file, device='cuda:0')
+        rospy.loginfo("Detector initialized.")
+
+        self._obj_class_mapping = self._model.cfg.class_names
+        if semantics_output_topic:
+            self._pts_class_mapping = np.array(self._model.cfg.seg_class_ids + [0], dtype='i1')
+
+        self._latest_message = None
+        self._new_message = Event()
+
+        self._subscriber = rospy.Subscriber(input_topic, PointCloud2, self.receive_point_cloud)
+        self._publisher = rospy.Publisher(objects_output_topic, DetectionBoxArray, queue_size=1)
+        self._semantics_publiser = None
+        if semantics_output_topic:
+            self._semantics_publiser = rospy.Publisher(semantics_output_topic, PointCloud2, queue_size=1)
+
+    def receive_point_cloud(self, msg):
+        self._latest_message = msg
+        self._new_message.set()
+
+    def publish_results(self, results: dict, input_header, input_cloud) -> None:
+        bbox_results = results['pts_bbox'] if 'pts_bbox' in results else results
+        boxes, scores, labels = bbox_results["boxes_3d"], bbox_results["scores_3d"], bbox_results["labels_3d"]
+
+        # create obj array
+        objs_msg = DetectionBoxArray()
+        for box, score, label in zip(boxes, scores, labels):
+            if score < self._score_thres:
+                continue
+
+            new_obj = DetectionBox()
+            qx, qy, qz, qw = Rotation.from_euler('Z', -box[6] - np.pi/2).as_quat()
+            new_obj.bbox.pose.pose.position.x = float(box[0])
+            new_obj.bbox.pose.pose.position.y = float(box[1])
+            new_obj.bbox.pose.pose.position.z = float(box[2] + box[5]/2)
+            new_obj.bbox.pose.pose.orientation.x = qx
+            new_obj.bbox.pose.pose.orientation.y = qy
+            new_obj.bbox.pose.pose.orientation.z = qz
+            new_obj.bbox.pose.pose.orientation.w = qw
+            new_obj.bbox.dimension.length_x = float(box[4])
+            new_obj.bbox.dimension.length_y = float(box[3])
+            new_obj.bbox.dimension.length_z = float(box[5])
+
+            # TODO: add label and score
+            objs_msg.detections.append(new_obj)
+
+        objs_msg.header = input_header
+        rospy.logdebug("Detected %d objects" % len(objs_msg.detections))
+        self._publisher.publish(objs_msg)
+
+        if self._semantics_publiser is not None and 'pts_pointwise' in results:
+            semantic_results = results['pts_pointwise']
+            labels = semantic_results.pop('semantic_label').numpy()
+            # TODO: add score output
+            labels = self._pts_class_mapping[labels]
+            sem_cloud = pcl.create_xyzl(np.hstack([input_cloud.xyz, labels.reshape(-1, 1)]))
+            sem_msg = sem_cloud.to_msg()
+            sem_msg.header = input_header
+            self._semantics_publiser.publish(sem_msg)
+
+    def loop(self):
+        while not rospy.is_shutdown():
+            self._new_message.wait()
+            self._new_message.clear()
+
+            input_msg = self._latest_message
+            cloud = pcl.PointCloud(input_msg)
+            if any(f.name == 'i' for f in cloud.fields):
+                # data from kitti
+                ifield = cloud['i']
+            elif any(f.name == 'intensity' for f in cloud.fields):
+                # data from real vehicle
+                ifield = cloud["intensity"]
+            else:
+                raise ValueError()
+
+            # arr.to_ndarray()[ifield] /= 256
+            point_arr = np.hstack([cloud.xyz, ifield.reshape(-1,1)])
+            point_arr = np.insert(point_arr, 4, 0, axis=1) # for nuscenes
+
+            results = inference_detector_online(self._model, point_arr)
+            self.publish_results(results, input_msg.header, cloud)
+
+if __name__ == "__main__":
+    rospy.init_node("mmdet3d_detector", log_level=rospy.DEBUG)
+
+    # ckpt_file = "/home/jacobz/Detection/mmdetection3d/work_dirs/centerpoint_01voxel_second_secfpn_circlenms_4x8_cyclic_20e_nus_20201001_135205-5db91e00.pth"
+    # config_file = "/home/jacobz/Detection/mmdetection3d/configs/centerpoint/centerpoint_01voxel_second_secfpn_circlenms_4x8_cyclic_20e_nus.py"
+    ckpt_file = "/home/jacobz/Detection/mmdetection3d/work_dirs/[slurm]epoch_30_dsfixed_gridsample.pth"
+    config_file = "/home/jacobz/Detection/mmdetection3d/configs/centerpoint/centerpoint_01voxel_second_secfpn_4x8_cyclic_30e_d3d-nuscenes_semantic-lovasz.py"
+
+    detector = MMDetector(config_file, ckpt_file, semantics_output_topic="/semantic_points")
+    dthread = Thread(target=detector.loop)
+    dthread.start()
+    rospy.on_shutdown(lambda: detector._new_message.set())
+    rospy.spin()
+    dthread.join()
+
