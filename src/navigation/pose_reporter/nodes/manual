@@ -11,17 +11,18 @@ from zzz_common.kinematics import get_absolute_state
 from zzz_driver_msgs.msg import RigidBodyStateStamped
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import NavSatFix
+from sensor_msgs.msg import NavSatFix, Imu
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 
 class Node(object):
     # TODO: add service callback to update map origin or reset odom origin, this will update both self._map_origin and self._odom_translation
-    # TODO: we don't have to guess for the origin of the map in Carla, but in a real car we need to get the starting point of a GPS
+    # TODO: add mode options, init_mode / update_mode: GNSS+ODOM, GNSS+IMU, GNSS+ODOM+IMU, order matters, value from sensor at left will be prioritized
     def __init__(self):
         params = parse_private_args(
             odom_input_topic = "/zzz/perception/odometry", # we will make sure odometry starts from origin of "odom" frame
             pose_output_topic = "ego_pose",
             gnss_input_topic = "/zzz/drivers/gnss",
+            imu_input_topic = "",
             map_origin = [0, 0, 0], # [lat, lon, alt]
             odom_translation = [0, 0, 0], # [x, y, z] in UTM
             odom_rotation = [0, 0, 0, 1], # [x, y, z, w]
@@ -39,19 +40,43 @@ class Node(object):
         self._init_position = None
         self._init_orientation = None
 
-        self._odom_subscriber = rospy.Subscriber(params.odom_input_topic, Odometry, self.odom_callback)
-        self._pose_publisher = rospy.Publisher(params.pose_output_topic, RigidBodyStateStamped, queue_size=1)
+        if params.imu_input_topic:
+            # prioritize IMU measurement over odometry
 
-        if self._guess_from_start:
-            self._gnss_subscriber = [
-                Subscriber(params.gnss_input_topic, NavSatFix),
-                Subscriber(params.odom_input_topic, Odometry)
+            self._pose_subscriber = [
+                Subscriber(params.odom_input_topic, Odometry),
+                Subscriber(params.imu_input_topic, Imu),
             ]
-            self._gnss_synchronizer = ApproximateTimeSynchronizer(
-                self._gnss_subscriber, 5, 0.1)
-            self._gnss_synchronizer.registerCallback(self.guess_start_callback)
+            self._pose_synchronizer = ApproximateTimeSynchronizer(
+                self._pose_subscriber, 5, 0.1)
+            self._pose_synchronizer.registerCallback(self.pose_callback)
+            self._pose_publisher = rospy.Publisher(params.pose_output_topic, RigidBodyStateStamped, queue_size=1)
 
-    def guess_start_callback(self, gnss, odom):
+            if self._guess_from_start:
+                self._guess_subscriber = [
+                    Subscriber(params.gnss_input_topic, NavSatFix),
+                    Subscriber(params.odom_input_topic, Odometry),
+                    Subscriber(params.imu_input_topic, Imu)
+                ]
+                self._guess_synchronizer = ApproximateTimeSynchronizer(
+                    self._guess_subscriber, 5, 0.1)
+                self._guess_synchronizer.registerCallback(self.guess_start_callback)
+
+        else:
+
+            self._pose_subscriber = rospy.Subscriber(params.odom_input_topic, Odometry, self.pose_callback_odom)
+            self._pose_publisher = rospy.Publisher(params.pose_output_topic, RigidBodyStateStamped, queue_size=1)
+
+            if self._guess_from_start:
+                self._guess_subscriber = [
+                    Subscriber(params.gnss_input_topic, NavSatFix),
+                    Subscriber(params.odom_input_topic, Odometry)
+                ]
+                self._guess_synchronizer = ApproximateTimeSynchronizer(
+                    self._guess_subscriber, 5, 0.1)
+                self._guess_synchronizer.registerCallback(self.guess_start_callback_gnss_odom)
+
+    def guess_start_callback(self, gnss, odom, imu):
         if not self._guess_from_start: # Prevent duplicate call
             return
 
@@ -60,62 +85,82 @@ class Node(object):
         gnss_proj = utm.from_latlon(gnss.latitude, gnss.longitude)
         # TODO: record covariance
 
+        position = np.array([
+            odom.pose.pose.position.x,
+            odom.pose.pose.position.y,
+            odom.pose.pose.position.z
+        ])
+
+        if imu:
+            orientation = np.array([
+                imu.orientation.x,
+                imu.orientation.y,
+                imu.orientation.z,
+                imu.orientation.w,
+            ])
+        else:
+            orientation = np.array([
+                odom.pose.pose.orientation.x,
+                odom.pose.pose.orientation.y,
+                odom.pose.pose.orientation.z,
+                odom.pose.pose.orientation.w
+            ])
+
         self._odom_translation = [
             gnss_proj[0] - map_proj[0], # East
             gnss_proj[1] - map_proj[1], # North
             gnss.altitude - self._map_origin[2] # Up
         ]
-        self._odom_rotation = np.array([
-            odom.pose.pose.orientation.x,
-            odom.pose.pose.orientation.y,
-            odom.pose.pose.orientation.z,
-            odom.pose.pose.orientation.w
-        ])
-        self._init_position = np.array([
-            odom.pose.pose.position.x,
-            odom.pose.pose.position.y,
-            odom.pose.pose.position.z
-        ])
-        self._init_orientation = np.array([
-            odom.pose.pose.orientation.x,
-            odom.pose.pose.orientation.y,
-            odom.pose.pose.orientation.z,
-            odom.pose.pose.orientation.w
-        ])
+        self._odom_rotation = orientation # assume that the orientation starts from East direction
+        self._init_position = position
+        self._init_orientation = orientation
 
         self._tfreporter_static.sendTransform(self.create_map_odom_transform())
 
         # Unregister subscriber
-        for sub in self._gnss_subscriber:
+        for sub in self._guess_subscriber:
             sub.sub.unregister()
         self._guess_from_start = False
 
-    def odom_callback(self, msg):
+    def guess_start_callback_gnss_odom(self, gnss, odom):
+        self.guess_start_callback(gnss, odom, None)
+
+    def pose_callback(self, odom, imu):
         if self._guess_from_start: # don't report if map origin is not initialized
             return
 
         # calculate relative odom
-        odom_quat = [msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w]
-        init_iquat = list(self._init_orientation[:3]) + [-self._init_orientation[3]]
-        rel_quat = tft.quaternion_multiply(init_iquat, odom_quat)
+        if imu:
+            # TODO: imu and odom can be in different frame
+            pose_quat = [imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w]
+        else:
+            pose_quat = [
+                odom.pose.pose.orientation.x,
+                odom.pose.pose.orientation.y,
+                odom.pose.pose.orientation.z,
+                odom.pose.pose.orientation.w
+            ]
+        init_iquat = tft.quaternion_inverse(self._init_orientation)
+        rel_quat = tft.quaternion_multiply(init_iquat, pose_quat)
 
-        pos = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        pos = np.array([odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z])
         diff = np.dot(pos - self._init_position, tft.quaternion_matrix(init_iquat)[:3,:3].T)
-        msg.pose.pose.position.x = diff[0]
-        msg.pose.pose.position.y = diff[1]
-        msg.pose.pose.position.z = diff[2]
-        msg.pose.pose.orientation.x = rel_quat[0]
-        msg.pose.pose.orientation.y = rel_quat[1]
-        msg.pose.pose.orientation.z = rel_quat[2]
-        msg.pose.pose.orientation.w = rel_quat[3]
+        odom.pose.pose.position.x = diff[0]
+        odom.pose.pose.position.y = diff[1]
+        odom.pose.pose.position.z = diff[2]
+        odom.pose.pose.orientation.x = rel_quat[0]
+        odom.pose.pose.orientation.y = rel_quat[1]
+        odom.pose.pose.orientation.z = rel_quat[2]
+        odom.pose.pose.orientation.w = rel_quat[3]
 
-        self._tfreporter.sendTransform(self.create_odom_base_transform(msg))
+        self._tfreporter.sendTransform(self.create_odom_base_transform(odom))
 
         rel_state = RigidBodyStateStamped()
-        rel_state.header = msg.header
-        rel_state.state.child_frame_id = msg.child_frame_id
-        rel_state.state.pose = msg.pose
-        rel_state.state.twist = msg.twist
+        rel_state.header = odom.header
+        rel_state.state.child_frame_id = odom.child_frame_id
+        rel_state.state.pose = odom.pose
+        rel_state.state.twist = odom.twist
+        # TODO: add IMU values into state
 
         # Transformation from odom frame to map is static
         odom_state = RigidBodyStateStamped()
@@ -133,7 +178,18 @@ class Node(object):
         state = get_absolute_state(rel_state, odom_state, check_frame=False)
         self._pose_publisher.publish(state)
 
-        rospy.logdebug("Position: %.3f, %.3f", state.state.pose.pose.position.x, state.state.pose.pose.position.y)
+        euler = np.array(tft.euler_from_quaternion([
+            state.state.pose.pose.orientation.x,
+            state.state.pose.pose.orientation.y,
+            state.state.pose.pose.orientation.z,
+            state.state.pose.pose.orientation.w
+        ])) * 180 / np.pi
+        rospy.logdebug("Position: x=%.3f, y=%.3f, z=%.3f, Orientation: r=%.3f°, p=%.3f°, y=%.3f°",
+            state.state.pose.pose.position.x, state.state.pose.pose.position.y, state.state.pose.pose.position.z,
+            euler[0], euler[1], euler[2])
+
+    def pose_callback_odom(self, odom):
+        self.pose_callback(odom, None)
 
     def create_map_odom_transform(self):
         transform = TransformStamped()

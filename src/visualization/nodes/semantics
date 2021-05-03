@@ -1,0 +1,56 @@
+#!/usr/bin/env python
+
+import pcl
+import numpy as np
+import rospy
+from sensor_msgs.msg import PointCloud2
+
+from zzz_common.params import parse_private_args
+
+colormaps = {"nuscenes": [
+    (0, 0, 0),
+    (112, 128, 144),  # Slategrey
+    (220, 20, 60),  # Crimson
+    (255, 127, 80),  # Coral
+    (255, 158, 0),  # Orange
+    (233, 150, 70),  # Darksalmon
+    (255, 61, 99),  # Red
+    (0, 0, 230),  # Blue
+    (47, 79, 79),  # Darkslategrey
+    (255, 140, 0),  # Darkorange
+    (255, 99, 71),  # Tomato
+    (0, 207, 191),  # nuTonomy green
+    (175, 0, 75),
+    (75, 0, 75),
+    (112, 180, 60),
+    (222, 184, 135),  # Burlywood
+    (0, 175, 0),  # Green
+    (0, 0, 0),
+]}
+colormaps = {k: np.array(cm) for k, cm in colormaps.items()}
+
+class Node():
+    def __init__(self):
+        params = parse_private_args(
+            input_topic="points_semantic",
+            output_topic="points_semantic_vis",
+            colormap="nuscenes"
+        )
+
+        self._colormap = colormaps[params.colormap]
+        self._detections_subscriber = rospy.Subscriber(params.pop("input_topic"), PointCloud2, self.point_cloud_callback)
+        self._publisher = rospy.Publisher(params.pop("output_topic"), PointCloud2, queue_size=1)
+
+    def point_cloud_callback(self, msg):
+        cloud = pcl.PointCloud(msg)
+        rgb = self._colormap[cloud['label']]
+        new_cloud = pcl.create_xyzrgb(np.hstack([cloud.xyz, rgb]))
+        new_msg = new_cloud.to_msg()
+        new_msg.header = msg.header
+        self._publisher.publish(new_msg)
+
+if __name__ == "__main__":
+    rospy.init_node("semantics_visualize")
+    node = Node()
+    rospy.spin()
+

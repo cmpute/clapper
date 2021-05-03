@@ -10,6 +10,7 @@ import pcl
 
 import rospy
 from sensor_msgs.msg import PointCloud2
+from zzz_common.params import parse_private_args
 from zzz_perception_msgs.msg import DetectionBoxArray, DetectionBox
 
 from scipy.spatial.transform import Rotation
@@ -20,32 +21,39 @@ from copy import deepcopy
 import torch
 
 class MMDetector:
-    def __init__(self,
-                 config_file,
-                 checkpoint_file,
-                 input_topic="/velodyne_points",
-                 objects_output_topic="/objects_detected",
-                 semantics_output_topic="", # Empty means don't use semantics
-                 scale_intensity=False, # True: intensity=[0-1]
-                 score_thres=0.4,
-                 time_buffer=-1, # TODO: implement this, >=0 means using timestamp in point cloud input (as in Nuscenes)
-                 remove_close=1): # remove points close to origin, value is the threshold
-        self._score_thres = score_thres
-        self._model = init_detector(config_file, checkpoint_file, device='cuda:0')
+    def __init__(self):
+
+        params = parse_private_args(
+            config_file=None,
+            checkpoint_file=None,
+            input_topic="/velodyne_points",
+            objects_output_topic="/objects_detected",
+            semantics_output_topic="", # Empty means don't use semantics
+            scale_intensity=False, # TODO: True: intensity=[0-1]
+            score_thres=0.4,
+            time_buffer=-1, # TODO: implement this, >=0 means using timestamp in point cloud input (as in Nuscenes)
+            remove_close=1 # TODO: remove points close to origin, value is the threshold
+        )
+
+        if params.config_file is None or params.checkpoint_file is None:
+            raise ValueError("Config file and checkpoint weights are required!")
+
+        self._score_thres = params.score_thres
+        self._model = init_detector(params.config_file, params.checkpoint_file, device='cuda:0')
         rospy.loginfo("Detector initialized.")
 
         self._obj_class_mapping = self._model.cfg.class_names
-        if semantics_output_topic:
+        if params.semantics_output_topic:
             self._pts_class_mapping = np.array(self._model.cfg.seg_class_ids + [0], dtype='i1')
 
         self._latest_message = None
         self._new_message = Event()
 
-        self._subscriber = rospy.Subscriber(input_topic, PointCloud2, self.receive_point_cloud)
-        self._publisher = rospy.Publisher(objects_output_topic, DetectionBoxArray, queue_size=1)
+        self._subscriber = rospy.Subscriber(params.input_topic, PointCloud2, self.receive_point_cloud)
+        self._publisher = rospy.Publisher(params.objects_output_topic, DetectionBoxArray, queue_size=1)
         self._semantics_publiser = None
-        if semantics_output_topic:
-            self._semantics_publiser = rospy.Publisher(semantics_output_topic, PointCloud2, queue_size=1)
+        if params.semantics_output_topic:
+            self._semantics_publiser = rospy.Publisher(params.semantics_output_topic, PointCloud2, queue_size=1)
 
     def receive_point_cloud(self, msg):
         self._latest_message = msg
@@ -117,15 +125,9 @@ class MMDetector:
 if __name__ == "__main__":
     rospy.init_node("mmdet3d_detector", log_level=rospy.DEBUG)
 
-    # ckpt_file = "/home/jacobz/Detection/mmdetection3d/work_dirs/centerpoint_01voxel_second_secfpn_circlenms_4x8_cyclic_20e_nus_20201001_135205-5db91e00.pth"
-    # config_file = "/home/jacobz/Detection/mmdetection3d/configs/centerpoint/centerpoint_01voxel_second_secfpn_circlenms_4x8_cyclic_20e_nus.py"
-    ckpt_file = "/home/jacobz/Detection/mmdetection3d/work_dirs/[slurm]epoch_30_dsfixed_gridsample.pth"
-    config_file = "/home/jacobz/Detection/mmdetection3d/configs/centerpoint/centerpoint_01voxel_second_secfpn_4x8_cyclic_30e_d3d-nuscenes_semantic-lovasz.py"
-
-    detector = MMDetector(config_file, ckpt_file, semantics_output_topic="/semantic_points")
+    detector = MMDetector()
     dthread = Thread(target=detector.loop)
     dthread.start()
     rospy.on_shutdown(lambda: detector._new_message.set())
     rospy.spin()
     dthread.join()
-
