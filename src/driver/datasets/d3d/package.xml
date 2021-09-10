@@ -1,8 +1,8 @@
 <package>
-  <name>zzz_driver_datasets_kitti</name>
+  <name>zzz_driver_datasets_d3d</name>
   <version>0.1.0</version>
   <description>
-    Driver for dataset input from KITTI dataset
+    Driver for dataset input using D3D library
   </description>
   <license>BSD</license>
   <maintainer email="zyxin@umich.edu">Yuanxin Zhong</maintainer>
@@ -13,5 +13,4 @@
   <url type="bugtracker">https://github.com/cmpute/zzz/issues</url>
 
   <buildtool_depend>catkin</buildtool_depend>
-  <run_depend>python-tqdm</run_depend>
 </package>

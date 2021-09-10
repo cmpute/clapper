@@ -3,6 +3,7 @@
 # To run with python in anaconda
 # assume anaconda home is $AHOME
 # PYTHONHOME=AHOME PYTHONPATH=$PYTHONPATH:AHOME/lib/python3.8/site-packages:/usr/lib/python3/dist-packages rosrun zzz_perception_detection_lidar_detectors mmdet3d_detector
+# The PYTHONHOME variable is only required when you are using development mode of packages
 
 import time, os
 import numpy as np

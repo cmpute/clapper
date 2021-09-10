@@ -1,0 +1,67 @@
+#!/usr/bin/env python
+
+import argparse
+import os
+import sys
+
+import d3d.dataset
+from d3d.io.ros import dump_sequence_dataset
+import rosbag
+
+from zzz_perception_msgs.msg import DetectionBoxArray, TrackingBoxArray
+
+LOADER_MAPPING = {
+    # 'kitti-object': d3d.dataset.kitti.KittiObjectLoader,
+    'kitti-odometry': d3d.dataset.kitti.KittiOdometryLoader,
+    'kitti-raw': d3d.dataset.kitti.KittiRawLoader,
+    'kitti-tracking': d3d.dataset.kitti.KittiTrackingLoader,
+    'cadcd': d3d.dataset.cadc.CADCDLoader,
+    'nuscenes': d3d.dataset.nuscenes.NuscenesLoader,
+    'waymo': d3d.dataset.waymo.WaymoLoader
+}
+
+def arg_parser():
+    parser = argparse.ArgumentParser(description="""Convert datasets to ROS bag file using d3d.
+Note that additional parameters for the loader class can be passed by arguments 'k=v' following '--'""")
+    parser.add_argument("type", choices=list(LOADER_MAPPING.keys()), help=\
+        "specify the dataset type to construct the loader")
+    parser.add_argument("root", default=os.getcwd(), help=\
+        "base directory of the dataset, if no directory passed the default is current working directory")
+    parser.add_argument("sequence", type=str, help=\
+        "Specify which sequence of the dataset. Use '+' to display all available sequences.")
+    parser.add_argument("-z", "--inzip", action='store_true', help=\
+        "load data directly from KITTI zip file")
+    parser.add_argument("-o", "--output-path", type=str, default="dataset.bag", help="The path to the output rosbag")
+    parser.add_argument("-c", "--compression", default="none", choices=["none", "bz2", "lz4"], help=\
+        "Compression algorithm for the bag. No compression is performed by default")
+    parser.add_argument("-l", "--limit", type=float, help=\
+        "Size limit of the rosbag in MB.")
+    return parser
+
+def objects_dumper(target_array):
+    return DetectionBoxArray() # TODO: implement this
+
+def main():
+    if '--' in sys.argv:
+        split = sys.argv.index('--')
+        loader_args = sys.argv[split:]
+        loader_args = {'='.split(item, 1) for item in loader_args}
+        print("Additional arguments passed to the converter")
+        args = arg_parser().parse_args(sys.argv[:split])
+    else:
+        loader_args = {}
+        args = arg_parser().parse_args()
+
+    loader = LOADER_MAPPING[args.type](args.root, inzip=args.inzip, **loader_args)
+    seq = args.sequence
+    if seq == '+':
+        print("Available sequences: " + str(loader.sequence_ids))
+        return
+
+    bag_out = rosbag.Bag(args.output_path, "w", compression=args.compression)
+    if isinstance(loader.sequence_ids[0], int):
+        seq = int(seq)
+    dump_sequence_dataset(loader, bag_out, sequence=seq, size_limit=args.limit*1048576, object_encoder=objects_dumper)
+
+if __name__ == "__main__":
+    main()

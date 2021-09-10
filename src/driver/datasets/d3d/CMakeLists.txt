@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(zzz_driver_datasets_kitti)
+project(zzz_driver_datasets_d3d)
 
 find_package(catkin REQUIRED)
 catkin_package()
