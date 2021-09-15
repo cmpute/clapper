@@ -5,10 +5,12 @@ import os
 import sys
 
 import d3d.dataset
+from d3d.abstraction import ObjectTarget3D, TrackingTarget3D
 from d3d.io.ros import dump_sequence_dataset
+from numpy import isin
 import rosbag
 
-from zzz_perception_msgs.msg import DetectionBoxArray, TrackingBoxArray
+from zzz_perception_msgs.msg import DetectionBoxArray, TrackingBoxArray, DetectionBox, TrackingBox
 
 LOADER_MAPPING = {
     # 'kitti-object': d3d.dataset.kitti.KittiObjectLoader,
@@ -25,10 +27,12 @@ def arg_parser():
 Note that additional parameters for the loader class can be passed by arguments 'k=v' following '--'""")
     parser.add_argument("type", choices=list(LOADER_MAPPING.keys()), help=\
         "specify the dataset type to construct the loader")
-    parser.add_argument("root", default=os.getcwd(), help=\
+    parser.add_argument("root", type=str, help=\
         "base directory of the dataset, if no directory passed the default is current working directory")
     parser.add_argument("sequence", type=str, help=\
         "Specify which sequence of the dataset. Use '+' to display all available sequences.")
+    parser.add_argument("-f", "--odom-frame", dest="frame", default="", type=str, help=\
+        "Specify which sensor frame is used for the initial odom pose. By default it's set to be the main lidar. This is critical for point cloud registration across frames.")
     parser.add_argument("-z", "--inzip", action='store_true', help=\
         "load data directly from KITTI zip file")
     parser.add_argument("-o", "--output-path", type=str, default="dataset.bag", help="The path to the output rosbag")
@@ -36,10 +40,44 @@ Note that additional parameters for the loader class can be passed by arguments 
         "Compression algorithm for the bag. No compression is performed by default")
     parser.add_argument("-l", "--limit", type=float, help=\
         "Size limit of the rosbag in MB.")
+    parser.add_argument("-p", "--point-label", dest="plabel", type=str,
+                        default="", help="This option specify the field name in point-wise label used as the 'label' field in the point cloud.")
     return parser
 
 def objects_dumper(target_array):
-    return DetectionBoxArray() # TODO: implement this
+    if len(target_array) == 0:
+        return DetectionBoxArray()
+    elif isinstance(target_array[0], TrackingTarget3D):
+        msg = TrackingBoxArray()
+    elif isinstance(target_array[0], ObjectTarget3D):
+        msg = DetectionBoxArray()
+    else:
+        raise ValueError("Invalid target type!")
+
+    for target in target_array:
+        if isinstance(target, TrackingTarget3D):
+            target_msg = TrackingBox()
+        else: # isinstance(target, ObjectTarget3D):
+            target_msg = DetectionBox()
+        target_msg.bbox.pose.pose.position.x = target.position[0]
+        target_msg.bbox.pose.pose.position.y = target.position[1]
+        target_msg.bbox.pose.pose.position.z = target.position[2]
+
+        quat = target.orientation.as_quat()
+        target_msg.bbox.pose.pose.orientation.x = quat[0]
+        target_msg.bbox.pose.pose.orientation.y = quat[1]
+        target_msg.bbox.pose.pose.orientation.z = quat[2]
+        target_msg.bbox.pose.pose.orientation.w = quat[3]
+
+        # TODO: convert the classification to CLAP format
+
+        if isinstance(target, TrackingTarget3D):
+            target_msg.uid = target.tid
+            msg.targets.append(target_msg)
+        else:
+            msg.detections.append(target_msg)
+
+    return msg
 
 def main():
     if '--' in sys.argv:
@@ -61,7 +99,11 @@ def main():
     bag_out = rosbag.Bag(args.output_path, "w", compression=args.compression)
     if isinstance(loader.sequence_ids[0], int):
         seq = int(seq)
-    dump_sequence_dataset(loader, bag_out, sequence=seq, size_limit=args.limit*1048576, object_encoder=objects_dumper)
+    dump_sequence_dataset(loader, bag_out, sequence=seq,
+                          size_limit=args.limit*1048576 if args.limit else None,
+                          object_encoder=objects_dumper,
+                          point_label_field=args.plabel,
+                          odom_frame=args.frame or loader.VALID_LIDAR_NAMES[0])
 
 if __name__ == "__main__":
     main()
