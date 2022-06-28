@@ -17,17 +17,25 @@ from zzz_perception_msgs.msg import DetectionBoxArray, DetectionBox
 from scipy.spatial.transform import Rotation
 from threading import Thread, Event
 
-from mmdet3d.apis import init_detector, inference_detector_online
-from copy import deepcopy
+from mmdet3d.core.points import LiDARPoints
+from mmdet3d.apis import init_model, inference_detector
 import torch
+
+DEFAULT_CONFIGS = {
+    "input_topic": "/velodyne_points_transformed",
+    # "checkpoint_file": "/home/redmkzlptp/mcity_project/mmdetection3d/checkpoints/hv_second_secfpn_6x8_80e_kitti-3d-3class_20210831_022017-ae782e87.pth",
+    # "config_file": "/home/redmkzlptp/mcity_project/mmdetection3d/configs/second/hv_second_secfpn_6x8_80e_kitti-3d-3class.py"
+    "checkpoint_file": "/home/redmkzlptp/mcity_project/mmdetection3d/checkpoints/centerpoint_01voxel_second_secfpn_circlenms_4x8_cyclic_20e_nus_20210815_085857-9ba7f3a5.pth",
+    "config_file": "/home/redmkzlptp/mcity_project/mmdetection3d/configs/centerpoint/centerpoint_01voxel_second_secfpn_circlenms_4x8_cyclic_20e_nus.py"
+}
 
 class MMDetector:
     def __init__(self):
 
         params = parse_private_args(
-            config_file=None,
-            checkpoint_file=None,
-            input_topic="/velodyne_points",
+            config_file=DEFAULT_CONFIGS['config_file'],
+            checkpoint_file=DEFAULT_CONFIGS['checkpoint_file'],
+            input_topic=DEFAULT_CONFIGS['input_topic'],
             objects_output_topic="/objects_detected",
             semantics_output_topic="", # Empty means don't use semantics
             scale_intensity=False, # TODO: True: intensity=[0-1]
@@ -40,7 +48,7 @@ class MMDetector:
             raise ValueError("Config file and checkpoint weights are required!")
 
         self._score_thres = params.score_thres
-        self._model = init_detector(params.config_file, params.checkpoint_file, device='cuda:0')
+        self._model = init_model(params.config_file, params.checkpoint_file, device='cuda:0')
         rospy.loginfo("Detector initialized.")
 
         self._obj_class_mapping = self._model.cfg.class_names
@@ -116,12 +124,14 @@ class MMDetector:
             else:
                 raise ValueError()
 
-            # arr.to_ndarray()[ifield] /= 256
+            # print(np.max(ifield), np.min(ifield))
+            ifield /= 256
             point_arr = np.hstack([cloud.xyz, ifield.reshape(-1,1)])
             point_arr = np.insert(point_arr, 4, 0, axis=1) # for nuscenes
+            points = LiDARPoints(point_arr, points_dim=point_arr.shape[-1], attribute_dims=None)
 
-            results = inference_detector_online(self._model, point_arr)
-            self.publish_results(results, input_msg.header, cloud)
+            results, _ = inference_detector(self._model, points)
+            self.publish_results(results[0], input_msg.header, cloud)
 
 if __name__ == "__main__":
     rospy.init_node("mmdet3d_detector", log_level=rospy.DEBUG)
